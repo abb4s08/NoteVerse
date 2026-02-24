@@ -1,0 +1,658 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  collection,
+  query,
+  orderBy,
+  onSnapshot,
+  addDoc,
+  serverTimestamp,
+  where,
+  getDocs,
+  limit,
+} from "firebase/firestore";
+import { db } from "@/lib/firebase";
+import { generateWithFallback } from "@/lib/gemini";
+import { useAuth } from "@/contexts/AuthContext";
+import {
+  Zap,
+  Loader2,
+  FileText,
+  CheckCircle2,
+  XCircle,
+  Trophy,
+  ChevronRight,
+  RotateCcw,
+  Medal,
+  BarChart3,
+} from "lucide-react";
+import { createNotification } from "@/lib/notifications";
+
+interface QuizQuestion {
+  question: string;
+  options: string[];
+  correctIndex: number;
+}
+
+interface Quiz {
+  id: string;
+  title: string;
+  questions: QuizQuestion[];
+  createdBy: string;
+  createdByName: string;
+  createdAt: { seconds: number } | null;
+}
+
+interface ScoreRecord {
+  id: string;
+  quizId: string;
+  quizTitle: string;
+  userId: string;
+  userName: string;
+  score: number;
+  total: number;
+  percentage: number;
+  createdAt: { seconds: number } | null;
+}
+
+interface QuizArchitectProps {
+  classroomId: string;
+  classroomName?: string;
+  prefill?: { content: string; title: string } | null;
+  onPrefillConsumed?: () => void;
+}
+
+export default function QuizArchitect({ classroomId, classroomName, prefill, onPrefillConsumed }: QuizArchitectProps) {
+  const { user, profile } = useAuth();
+  const isTeacher = profile?.role === "teacher";
+  const [quizzes, setQuizzes] = useState<Quiz[]>([]);
+  const [generating, setGenerating] = useState(false);
+  const [topicInput, setTopicInput] = useState("");
+  const [notesInput, setNotesInput] = useState("");
+
+  // Quiz taking state
+  const [activeQuiz, setActiveQuiz] = useState<Quiz | null>(null);
+  const [currentQ, setCurrentQ] = useState(0);
+  const [selectedAnswers, setSelectedAnswers] = useState<(number | null)[]>([]);
+  const [showResults, setShowResults] = useState(false);
+  const [leaderboard, setLeaderboard] = useState<ScoreRecord[]>([]);
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
+  const [scoreSaved, setScoreSaved] = useState(false);
+
+  useEffect(() => {
+    const q = query(
+      collection(db, "classrooms", classroomId, "quizzes"),
+      orderBy("createdAt", "desc")
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      setQuizzes(snap.docs.map((d) => ({ id: d.id, ...d.data() } as Quiz)));
+    });
+    return () => unsub();
+  }, [classroomId]);
+
+  // Handle prefill from Notes tab "Generate Quiz" button
+  useEffect(() => {
+    if (prefill) {
+      setTopicInput(prefill.title);
+      setNotesInput(prefill.content);
+      onPrefillConsumed?.();
+    }
+  }, [prefill, onPrefillConsumed]);
+
+  // Leaderboard: listen to top scores
+  useEffect(() => {
+    const q = query(
+      collection(db, "classrooms", classroomId, "quizScores"),
+      orderBy("percentage", "desc"),
+      limit(20)
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      setLeaderboard(
+        snap.docs.map((d) => ({ id: d.id, ...d.data() } as ScoreRecord))
+      );
+    });
+    return () => unsub();
+  }, [classroomId]);
+
+  const handleGenerate = async () => {
+    if (!user || !profile || generating) return;
+    if (!topicInput.trim() && !notesInput.trim()) return;
+    setGenerating(true);
+
+    try {
+      const prompt = `Generate a quiz with exactly 5 multiple-choice questions based on the following:
+
+${topicInput.trim() ? `Topic: ${topicInput.trim()}` : ""}
+${notesInput.trim() ? `Notes/Content:\n${notesInput.trim()}` : ""}
+
+Return ONLY a valid JSON array with this exact format (no markdown, no code blocks, just raw JSON):
+[
+  {
+    "question": "Question text here?",
+    "options": ["Option A", "Option B", "Option C", "Option D"],
+    "correctIndex": 0
+  }
+]
+
+Rules:
+- Exactly 5 questions
+- Exactly 4 options each
+- correctIndex is 0-3
+- Questions should test understanding, not just recall
+- Make questions progressively harder`;
+
+      const text = await generateWithFallback(prompt);
+
+      // Extract JSON from response
+      let jsonStr = text;
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (jsonMatch) jsonStr = jsonMatch[0];
+
+      const questions: QuizQuestion[] = JSON.parse(jsonStr);
+
+      if (!Array.isArray(questions) || questions.length === 0) {
+        throw new Error("Invalid quiz format");
+      }
+
+      // Save to Firestore
+      await addDoc(collection(db, "classrooms", classroomId, "quizzes"), {
+        title: topicInput.trim() || "Quiz from Notes",
+        questions: questions.slice(0, 5),
+        createdBy: user.uid,
+        createdByName: profile.fullName,
+        createdAt: serverTimestamp(),
+      });
+
+      // Notification: quiz published
+      createNotification({
+        classId: classroomId,
+        className: classroomName || "",
+        type: "QUIZ_PUBLISHED",
+        message: `${profile.fullName} published a new quiz: "${topicInput.trim() || "Quiz from Notes"}"`,
+        actorName: profile.fullName,
+        actorUid: user.uid,
+      });
+
+      setTopicInput("");
+      setNotesInput("");
+    } catch (err) {
+      console.error("Quiz generation error:", err);
+      alert("Failed to generate quiz. Please try again.");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const startQuiz = (quiz: Quiz) => {
+    setActiveQuiz(quiz);
+    setCurrentQ(0);
+    setSelectedAnswers(new Array(quiz.questions.length).fill(null));
+    setShowResults(false);
+    setScoreSaved(false);
+  };
+
+  const saveScore = async (quiz: Quiz, score: number, total: number) => {
+    if (!user || !profile || scoreSaved) return;
+    try {
+      const percentage = Math.round((score / total) * 100);
+      await addDoc(collection(db, "classrooms", classroomId, "quizScores"), {
+        quizId: quiz.id,
+        quizTitle: quiz.title,
+        userId: user.uid,
+        userName: profile.fullName,
+        score,
+        total,
+        percentage,
+        createdAt: serverTimestamp(),
+      });
+      setScoreSaved(true);
+    } catch (err) {
+      console.error("Error saving score:", err);
+    }
+  };
+
+  const selectAnswer = (answerIndex: number) => {
+    const updated = [...selectedAnswers];
+    updated[currentQ] = answerIndex;
+    setSelectedAnswers(updated);
+  };
+
+  const getScore = () => {
+    if (!activeQuiz) return 0;
+    return activeQuiz.questions.reduce((score, q, i) => {
+      return score + (selectedAnswers[i] === q.correctIndex ? 1 : 0);
+    }, 0);
+  };
+
+  const formatDate = (timestamp: { seconds: number } | null) => {
+    if (!timestamp) return "Just now";
+    return new Date(timestamp.seconds * 1000).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  };
+
+  // Active quiz view
+  if (activeQuiz) {
+    const question = activeQuiz.questions[currentQ];
+
+    if (showResults) {
+      const score = getScore();
+      const total = activeQuiz.questions.length;
+      const percentage = Math.round((score / total) * 100);
+
+      // Auto-save score when results are first shown
+      if (!scoreSaved) {
+        saveScore(activeQuiz, score, total);
+      }
+
+      return (
+        <div className="flex h-full items-center justify-center p-6">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="glass-strong w-full max-w-md rounded-3xl p-8 text-center"
+          >
+            <motion.div
+              initial={{ scale: 0 }}
+              animate={{ scale: 1 }}
+              transition={{ type: "spring", delay: 0.2 }}
+              className={`mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-full ${
+                percentage >= 80
+                  ? "bg-emerald-500/15"
+                  : percentage >= 50
+                  ? "bg-amber-500/15"
+                  : "bg-red-500/15"
+              }`}
+            >
+              <Trophy
+                className={`h-10 w-10 ${
+                  percentage >= 80
+                    ? "text-emerald-400"
+                    : percentage >= 50
+                    ? "text-amber-400"
+                    : "text-red-400"
+                }`}
+              />
+            </motion.div>
+
+            <h3 className="font-[var(--font-outfit)] mb-1 text-2xl font-bold text-white">
+              {percentage >= 80
+                ? "Excellent!"
+                : percentage >= 50
+                ? "Good Job!"
+                : "Keep Studying!"}
+            </h3>
+            <p className="mb-6 text-white/40">
+              You scored{" "}
+              <span className="font-bold text-white">
+                {score}/{total}
+              </span>{" "}
+              ({percentage}%)
+            </p>
+
+            {/* Review answers */}
+            <div className="mb-6 space-y-3 text-left">
+              {activeQuiz.questions.map((q, i) => {
+                const isCorrect = selectedAnswers[i] === q.correctIndex;
+                return (
+                  <div
+                    key={i}
+                    className={`rounded-xl border px-4 py-3 ${
+                      isCorrect
+                        ? "border-emerald-500/20 bg-emerald-500/5"
+                        : "border-red-500/20 bg-red-500/5"
+                    }`}
+                  >
+                    <div className="flex items-start gap-2">
+                      {isCorrect ? (
+                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+                      ) : (
+                        <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+                      )}
+                      <div>
+                        <p className="text-xs text-white/60">{q.question}</p>
+                        {!isCorrect && (
+                          <p className="mt-1 text-xs text-emerald-400">
+                            Correct: {q.options[q.correctIndex]}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => startQuiz(activeQuiz)}
+                className="glass flex flex-1 items-center justify-center gap-2 rounded-xl py-3 text-sm font-medium text-white/50 hover:text-white"
+              >
+                <RotateCcw className="h-4 w-4" />
+                Retry
+              </button>
+              <motion.button
+                onClick={() => setActiveQuiz(null)}
+                className="flex-1 rounded-xl bg-accent-blue py-3 text-sm font-bold text-white"
+                whileTap={{ scale: 0.98 }}
+              >
+                Done
+              </motion.button>
+            </div>
+          </motion.div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex h-full items-center justify-center p-6">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-lg"
+        >
+          {/* Progress */}
+          <div className="mb-6 flex items-center justify-between">
+            <span className="text-sm text-white/40">
+              Question {currentQ + 1} of {activeQuiz.questions.length}
+            </span>
+            <button
+              onClick={() => setActiveQuiz(null)}
+              className="text-sm text-white/30 hover:text-white/60"
+            >
+              Exit Quiz
+            </button>
+          </div>
+
+          <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-white/5">
+            <motion.div
+              className="h-full rounded-full bg-accent-blue"
+              animate={{
+                width: `${
+                  ((currentQ + 1) / activeQuiz.questions.length) * 100
+                }%`,
+              }}
+              transition={{ duration: 0.3 }}
+            />
+          </div>
+
+          {/* Question */}
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={currentQ}
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="glass-strong rounded-2xl p-8"
+            >
+              <h3 className="font-[var(--font-outfit)] mb-6 text-lg font-bold text-white">
+                {question.question}
+              </h3>
+
+              <div className="space-y-3">
+                {question.options.map((option, idx) => (
+                  <motion.button
+                    key={idx}
+                    onClick={() => selectAnswer(idx)}
+                    className={`w-full rounded-xl border px-4 py-3 text-left text-sm transition-all ${
+                      selectedAnswers[currentQ] === idx
+                        ? "border-accent-blue/40 bg-accent-blue/15 text-white"
+                        : "border-white/5 bg-white/5 text-white/60 hover:border-white/10 hover:bg-white/8"
+                    }`}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    <span className="mr-3 inline-flex h-6 w-6 items-center justify-center rounded-md bg-white/5 text-xs font-bold">
+                      {String.fromCharCode(65 + idx)}
+                    </span>
+                    {option}
+                  </motion.button>
+                ))}
+              </div>
+
+              <div className="mt-6 flex justify-between">
+                <button
+                  onClick={() => setCurrentQ(Math.max(0, currentQ - 1))}
+                  disabled={currentQ === 0}
+                  className="text-sm text-white/30 hover:text-white/60 disabled:opacity-30"
+                >
+                  Previous
+                </button>
+                <motion.button
+                  onClick={() => {
+                    if (currentQ < activeQuiz.questions.length - 1) {
+                      setCurrentQ(currentQ + 1);
+                    } else {
+                      setShowResults(true);
+                    }
+                  }}
+                  disabled={selectedAnswers[currentQ] === null}
+                  className="flex items-center gap-1 rounded-xl bg-accent-blue px-5 py-2.5 text-sm font-bold text-white disabled:opacity-40"
+                  whileTap={{ scale: 0.98 }}
+                >
+                  {currentQ < activeQuiz.questions.length - 1
+                    ? "Next"
+                    : "Finish"}
+                  <ChevronRight className="h-4 w-4" />
+                </motion.button>
+              </div>
+            </motion.div>
+          </AnimatePresence>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // Quiz list / generator view
+  return (
+    <div className="mx-auto max-w-4xl p-6">
+      <motion.div
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+      >
+        {/* Header */}
+        <div className="mb-6 flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500/15">
+            <Zap className="h-5 w-5 text-amber-400" />
+          </div>
+          <div>
+            <h2 className="font-[var(--font-outfit)] text-2xl font-bold text-white">
+              Quiz Architect
+            </h2>
+            <p className="text-sm text-white/40">
+              {isTeacher
+                ? "Generate AI quizzes for your students"
+                : "Take quizzes created by your teacher"}
+            </p>
+          </div>
+        </div>
+
+        {/* Teacher: Quiz generator */}
+        {isTeacher && (
+          <div className="glass-strong mb-8 rounded-2xl p-6">
+            <h3 className="font-[var(--font-outfit)] mb-4 text-base font-bold text-white">
+              Generate a New Quiz
+            </h3>
+            <div className="space-y-3">
+              <input
+                type="text"
+                value={topicInput}
+                onChange={(e) => setTopicInput(e.target.value)}
+                placeholder="Quiz topic (e.g. Photosynthesis, World War II)..."
+                className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder-white/25 outline-none focus:border-accent-blue/50"
+              />
+              <textarea
+                value={notesInput}
+                onChange={(e) => setNotesInput(e.target.value)}
+                placeholder="Paste notes or study material here (optional — AI will generate questions from this content)..."
+                rows={5}
+                className="w-full resize-none rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm leading-relaxed text-white placeholder-white/25 outline-none focus:border-accent-blue/50"
+              />
+              <motion.button
+                onClick={handleGenerate}
+                disabled={(!topicInput.trim() && !notesInput.trim()) || generating}
+                className="flex items-center gap-2 rounded-xl bg-accent-gold px-6 py-3 text-sm font-bold text-cosmic-deep shadow-lg shadow-accent-gold/25 disabled:opacity-50"
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                {generating ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Generating...
+                  </>
+                ) : (
+                  <>
+                    <Zap className="h-4 w-4" />
+                    Generate 5-Question Quiz
+                  </>
+                )}
+              </motion.button>
+            </div>
+          </div>
+        )}
+
+        {/* Quiz list */}
+        <div>
+          <h3 className="mb-4 text-xs font-semibold tracking-wider text-white/30 uppercase">
+            Available Quizzes ({quizzes.length})
+          </h3>
+
+          {quizzes.length === 0 ? (
+            <div className="glass rounded-2xl py-16 text-center text-white/30">
+              <Zap className="mx-auto mb-3 h-12 w-12 opacity-30" />
+              <p>
+                {isTeacher
+                  ? "No quizzes yet. Generate one above!"
+                  : "No quizzes available yet. Your teacher will create some soon!"}
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {quizzes.map((quiz, i) => (
+                <motion.div
+                  key={quiz.id}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: i * 0.05 }}
+                  className="glass group flex items-center justify-between rounded-2xl p-5 transition-all hover:bg-white/8"
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-accent-gold/10">
+                      <FileText className="h-5 w-5 text-accent-gold" />
+                    </div>
+                    <div>
+                      <h4 className="font-[var(--font-outfit)] text-base font-bold text-white">
+                        {quiz.title}
+                      </h4>
+                      <p className="text-xs text-white/30">
+                        {quiz.questions.length} questions · by{" "}
+                        {quiz.createdByName} ·{" "}
+                        {formatDate(quiz.createdAt)}
+                      </p>
+                    </div>
+                  </div>
+
+                  <motion.button
+                    onClick={() => startQuiz(quiz)}
+                    className="flex items-center gap-2 rounded-xl bg-accent-blue px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-accent-blue/25"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    Take Quiz
+                    <ChevronRight className="h-4 w-4" />
+                  </motion.button>
+                </motion.div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Leaderboard */}
+        {leaderboard.length > 0 && (
+          <div className="mt-8">
+            <button
+              onClick={() => setShowLeaderboard(!showLeaderboard)}
+              className="mb-4 flex items-center gap-2 text-xs font-semibold tracking-wider text-white/30 uppercase hover:text-white/50"
+            >
+              <BarChart3 className="h-4 w-4" />
+              Score Leaderboard ({leaderboard.length})
+              <ChevronRight
+                className={`h-3 w-3 transition-transform ${
+                  showLeaderboard ? "rotate-90" : ""
+                }`}
+              />
+            </button>
+
+            <AnimatePresence>
+              {showLeaderboard && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden"
+                >
+                  <div className="glass-strong overflow-hidden rounded-2xl">
+                    <div className="grid grid-cols-[auto_1fr_auto_auto] items-center gap-4 border-b border-white/5 px-5 py-3 text-[10px] font-semibold tracking-wider text-white/30 uppercase">
+                      <span>#</span>
+                      <span>Student</span>
+                      <span>Quiz</span>
+                      <span>Score</span>
+                    </div>
+                    {leaderboard.map((record, i) => (
+                      <motion.div
+                        key={record.id}
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: i * 0.03 }}
+                        className="grid grid-cols-[auto_1fr_auto_auto] items-center gap-4 border-b border-white/[0.02] px-5 py-3 last:border-0"
+                      >
+                        <span className="flex h-6 w-6 items-center justify-center">
+                          {i < 3 ? (
+                            <Medal
+                              className={`h-4 w-4 ${
+                                i === 0
+                                  ? "text-accent-gold"
+                                  : i === 1
+                                  ? "text-gray-300"
+                                  : "text-amber-600"
+                              }`}
+                            />
+                          ) : (
+                            <span className="text-xs text-white/20">
+                              {i + 1}
+                            </span>
+                          )}
+                        </span>
+                        <span className="truncate text-sm text-white/70">
+                          {record.userName}
+                        </span>
+                        <span className="truncate text-xs text-white/30">
+                          {record.quizTitle}
+                        </span>
+                        <span
+                          className={`rounded-md px-2 py-0.5 text-xs font-bold ${
+                            record.percentage >= 80
+                              ? "bg-emerald-500/10 text-emerald-400"
+                              : record.percentage >= 50
+                              ? "bg-amber-500/10 text-amber-400"
+                              : "bg-red-500/10 text-red-400"
+                          }`}
+                        >
+                          {record.score}/{record.total}
+                        </span>
+                      </motion.div>
+                    ))}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
+      </motion.div>
+    </div>
+  );
+}

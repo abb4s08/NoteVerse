@@ -178,7 +178,7 @@ export default function ClassroomHubPage() {
       case "discussion":
         return <DiscussionTab classroomId={classId} />;
       case "ai-chat":
-        return <AIChatTab />;
+        return <AIChatTab classroomId={classId} />;
       case "quiz":
         return (
           <QuizArchitect

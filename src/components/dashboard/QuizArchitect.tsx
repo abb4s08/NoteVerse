@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   collection,
@@ -9,9 +9,6 @@ import {
   onSnapshot,
   addDoc,
   serverTimestamp,
-  where,
-  getDocs,
-  limit,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { generateWithFallback } from "@/lib/gemini";
@@ -27,6 +24,11 @@ import {
   RotateCcw,
   Medal,
   BarChart3,
+  Clock,
+  Upload,
+  X,
+  Image as ImageIcon,
+  FileUp,
 } from "lucide-react";
 import { createNotification } from "@/lib/notifications";
 
@@ -54,7 +56,25 @@ interface ScoreRecord {
   score: number;
   total: number;
   percentage: number;
+  timeTakenSeconds?: number;
   createdAt: { seconds: number } | null;
+}
+
+/** Best-score per student for a specific quiz */
+interface LeaderboardEntry {
+  userId: string;
+  userName: string;
+  bestPercentage: number;
+  bestScore: number;
+  bestTotal: number;
+  bestTime: number | null;
+}
+
+/** Per-quiz leaderboard group */
+interface QuizLeaderboard {
+  quizId: string;
+  quizTitle: string;
+  entries: LeaderboardEntry[];
 }
 
 interface QuizArchitectProps {
@@ -71,15 +91,28 @@ export default function QuizArchitect({ classroomId, classroomName, prefill, onP
   const [generating, setGenerating] = useState(false);
   const [topicInput, setTopicInput] = useState("");
   const [notesInput, setNotesInput] = useState("");
+  const [questionCount, setQuestionCount] = useState(5);
+
+  // File upload state
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [fileProcessing, setFileProcessing] = useState(false);
+  const [fileError, setFileError] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Quiz taking state
   const [activeQuiz, setActiveQuiz] = useState<Quiz | null>(null);
   const [currentQ, setCurrentQ] = useState(0);
   const [selectedAnswers, setSelectedAnswers] = useState<(number | null)[]>([]);
   const [showResults, setShowResults] = useState(false);
-  const [leaderboard, setLeaderboard] = useState<ScoreRecord[]>([]);
+  const [rawScores, setRawScores] = useState<ScoreRecord[]>([]);
+  const [quizLeaderboards, setQuizLeaderboards] = useState<QuizLeaderboard[]>([]);
+  const [expandedQuizLb, setExpandedQuizLb] = useState<Set<string>>(new Set());
   const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [scoreSaved, setScoreSaved] = useState(false);
+
+  // Timer state
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     const q = query(
@@ -101,20 +134,141 @@ export default function QuizArchitect({ classroomId, classroomName, prefill, onP
     }
   }, [prefill, onPrefillConsumed]);
 
-  // Leaderboard: listen to top scores
+  // Leaderboard: listen to all scores, deduplicate per student
   useEffect(() => {
     const q = query(
       collection(db, "classrooms", classroomId, "quizScores"),
-      orderBy("percentage", "desc"),
-      limit(20)
+      orderBy("percentage", "desc")
     );
     const unsub = onSnapshot(q, (snap) => {
-      setLeaderboard(
-        snap.docs.map((d) => ({ id: d.id, ...d.data() } as ScoreRecord))
-      );
+      const scores = snap.docs.map((d) => ({ id: d.id, ...d.data() } as ScoreRecord));
+      setRawScores(scores);
     });
     return () => unsub();
   }, [classroomId]);
+
+  // Deduplicate: best score per student PER QUIZ
+  useEffect(() => {
+    // Group scores by quizId
+    const quizMap = new Map<string, { title: string; scores: ScoreRecord[] }>();
+    for (const r of rawScores) {
+      if (!quizMap.has(r.quizId)) {
+        quizMap.set(r.quizId, { title: r.quizTitle, scores: [] });
+      }
+      quizMap.get(r.quizId)!.scores.push(r);
+    }
+
+    const boards: QuizLeaderboard[] = [];
+    for (const [quizId, { title, scores }] of quizMap) {
+      // Best attempt per student for this quiz
+      const studentMap = new Map<string, LeaderboardEntry>();
+      for (const s of scores) {
+        const existing = studentMap.get(s.userId);
+        if (
+          !existing ||
+          s.percentage > existing.bestPercentage ||
+          (s.percentage === existing.bestPercentage &&
+            s.timeTakenSeconds != null &&
+            (existing.bestTime == null || s.timeTakenSeconds < existing.bestTime))
+        ) {
+          studentMap.set(s.userId, {
+            userId: s.userId,
+            userName: s.userName,
+            bestPercentage: s.percentage,
+            bestScore: s.score,
+            bestTotal: s.total,
+            bestTime: s.timeTakenSeconds ?? null,
+          });
+        }
+      }
+      const sorted = Array.from(studentMap.values()).sort((a, b) => {
+        if (b.bestPercentage !== a.bestPercentage) return b.bestPercentage - a.bestPercentage;
+        if (a.bestTime != null && b.bestTime != null) return a.bestTime - b.bestTime;
+        return 0;
+      });
+      boards.push({ quizId, quizTitle: title, entries: sorted });
+    }
+    setQuizLeaderboards(boards);
+  }, [rawScores]);
+
+  // Timer: runs while quiz is active and results not shown
+  useEffect(() => {
+    if (activeQuiz && !showResults) {
+      timerRef.current = setInterval(() => {
+        setElapsedSeconds((s) => s + 1);
+      }, 1000);
+    } else {
+      if (timerRef.current) clearInterval(timerRef.current);
+    }
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [activeQuiz, showResults]);
+
+  const handleFileUpload = async (file: File) => {
+    setFileError("");
+    setUploadedFile(file);
+    setFileProcessing(true);
+
+    try {
+      const isPDF = file.type === "application/pdf";
+      const isImage = file.type.startsWith("image/");
+
+      if (!isPDF && !isImage) {
+        throw new Error("Please upload a PDF or image file (PNG, JPG, WEBP)");
+      }
+
+      if (file.size > 10 * 1024 * 1024) {
+        throw new Error("File too large. Maximum size is 10MB.");
+      }
+
+      if (isPDF) {
+        // Parse PDF via server route
+        const formData = new FormData();
+        formData.append("file", file);
+        const res = await fetch("/api/ai/parse-pdf", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || "Failed to parse PDF");
+        const pdfText = (data.text || "").trim();
+        if (!pdfText) throw new Error("Could not extract text from PDF. The file may be scanned/image-based.");
+        setNotesInput((prev) => (prev ? prev + "\n\n" : "") + pdfText);
+      } else if (isImage) {
+        // Convert image to base64, send to AI to extract content
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error("Failed to read image"));
+          reader.readAsDataURL(file);
+        });
+        // Extract the base64 data part
+        const base64Data = base64.split(",")[1];
+        const mimeType = file.type;
+
+        // Use the AI chat endpoint to extract text from the image
+        const res = await fetch("/api/ai/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messages: [{ role: "user", content: "Extract ALL text and content from this image. Return ONLY the raw text/content, no commentary or formatting instructions. If it contains handwritten notes, diagrams, or formulas, describe them accurately." }],
+            imageBase64: base64Data,
+            imageMimeType: mimeType,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || "Failed to extract text from image");
+        const imageText = (data.response || "").trim();
+        if (!imageText) throw new Error("Could not extract content from image.");
+        setNotesInput((prev) => (prev ? prev + "\n\n" : "") + imageText);
+      }
+    } catch (err) {
+      console.error("File upload error:", err);
+      setFileError(err instanceof Error ? err.message : "Failed to process file");
+      setUploadedFile(null);
+    } finally {
+      setFileProcessing(false);
+    }
+  };
 
   const handleGenerate = async () => {
     if (!user || !profile || generating) return;
@@ -122,7 +276,7 @@ export default function QuizArchitect({ classroomId, classroomName, prefill, onP
     setGenerating(true);
 
     try {
-      const prompt = `Generate a quiz with exactly 5 multiple-choice questions based on the following:
+      const prompt = `Generate a quiz with exactly ${questionCount} multiple-choice questions based on the following:
 
 ${topicInput.trim() ? `Topic: ${topicInput.trim()}` : ""}
 ${notesInput.trim() ? `Notes/Content:\n${notesInput.trim()}` : ""}
@@ -137,7 +291,7 @@ Return ONLY a valid JSON array with this exact format (no markdown, no code bloc
 ]
 
 Rules:
-- Exactly 5 questions
+- Exactly ${questionCount} questions
 - Exactly 4 options each
 - correctIndex is 0-3
 - Questions should test understanding, not just recall
@@ -159,7 +313,7 @@ Rules:
       // Save to Firestore
       await addDoc(collection(db, "classrooms", classroomId, "quizzes"), {
         title: topicInput.trim() || "Quiz from Notes",
-        questions: questions.slice(0, 5),
+        questions: questions.slice(0, questionCount),
         createdBy: user.uid,
         createdByName: profile.fullName,
         createdAt: serverTimestamp(),
@@ -191,6 +345,13 @@ Rules:
     setSelectedAnswers(new Array(quiz.questions.length).fill(null));
     setShowResults(false);
     setScoreSaved(false);
+    setElapsedSeconds(0);
+  };
+
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
   const saveScore = async (quiz: Quiz, score: number, total: number) => {
@@ -205,6 +366,7 @@ Rules:
         score,
         total,
         percentage,
+        timeTakenSeconds: elapsedSeconds,
         createdAt: serverTimestamp(),
       });
       setScoreSaved(true);
@@ -287,12 +449,16 @@ Rules:
                 ? "Good Job!"
                 : "Keep Studying!"}
             </h3>
-            <p className="mb-6 text-white/40">
+            <p className="mb-2 text-white/40">
               You scored{" "}
               <span className="font-bold text-white">
                 {score}/{total}
               </span>{" "}
               ({percentage}%)
+            </p>
+            <p className="mb-6 flex items-center justify-center gap-1 text-sm text-white/30">
+              <Clock className="h-3.5 w-3.5" />
+              Time: <span className="font-medium text-white/50">{formatTime(elapsedSeconds)}</span>
             </p>
 
             {/* Review answers */}
@@ -361,12 +527,18 @@ Rules:
             <span className="text-sm text-white/40">
               Question {currentQ + 1} of {activeQuiz.questions.length}
             </span>
-            <button
-              onClick={() => setActiveQuiz(null)}
-              className="text-sm text-white/30 hover:text-white/60"
-            >
-              Exit Quiz
-            </button>
+            <div className="flex items-center gap-3">
+              <span className="flex items-center gap-1 rounded-lg bg-white/5 px-2.5 py-1 text-xs font-medium text-white/50">
+                <Clock className="h-3.5 w-3.5" />
+                {formatTime(elapsedSeconds)}
+              </span>
+              <button
+                onClick={() => setActiveQuiz(null)}
+                className="text-sm text-white/30 hover:text-white/60"
+              >
+                Exit Quiz
+              </button>
+            </div>
           </div>
 
           <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-white/5">
@@ -485,13 +657,131 @@ Rules:
                 placeholder="Quiz topic (e.g. Photosynthesis, World War II)..."
                 className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder-white/25 outline-none focus:border-accent-blue/50"
               />
-              <textarea
-                value={notesInput}
-                onChange={(e) => setNotesInput(e.target.value)}
-                placeholder="Paste notes or study material here (optional — AI will generate questions from this content)..."
-                rows={5}
-                className="w-full resize-none rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm leading-relaxed text-white placeholder-white/25 outline-none focus:border-accent-blue/50"
-              />
+              {/* File Upload Area */}
+              <div
+                onClick={() => !fileProcessing && fileInputRef.current?.click()}
+                className={`group relative cursor-pointer rounded-xl border-2 border-dashed transition-all ${
+                  fileProcessing
+                    ? "border-accent-blue/30 bg-accent-blue/5"
+                    : uploadedFile
+                    ? "border-emerald-500/30 bg-emerald-500/5"
+                    : "border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/5"
+                } px-4 py-4`}
+              >
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".pdf,image/png,image/jpeg,image/jpg,image/webp"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handleFileUpload(file);
+                    e.target.value = "";
+                  }}
+                />
+                {fileProcessing ? (
+                  <div className="flex items-center justify-center gap-3 py-2">
+                    <Loader2 className="h-5 w-5 animate-spin text-accent-blue" />
+                    <span className="text-sm text-accent-blue">Extracting content from {uploadedFile?.name}...</span>
+                  </div>
+                ) : uploadedFile ? (
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/15">
+                        {uploadedFile.type === "application/pdf" ? (
+                          <FileText className="h-4 w-4 text-emerald-400" />
+                        ) : (
+                          <ImageIcon className="h-4 w-4 text-emerald-400" />
+                        )}
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-emerald-400">{uploadedFile.name}</p>
+                        <p className="text-xs text-white/30">Content extracted — click to upload another</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setUploadedFile(null);
+                      }}
+                      className="rounded-lg p-1.5 text-white/30 hover:bg-white/10 hover:text-white/60"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center gap-2 py-2">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/5 transition-colors group-hover:bg-white/10">
+                      <FileUp className="h-5 w-5 text-white/30 transition-colors group-hover:text-white/50" />
+                    </div>
+                    <div className="text-center">
+                      <p className="text-sm font-medium text-white/40 group-hover:text-white/60">Upload Notes</p>
+                      <p className="text-xs text-white/20">PDF or Image (PNG, JPG) — AI will extract content</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {fileError && (
+                <div className="flex items-center gap-2 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">
+                  <XCircle className="h-4 w-4 shrink-0" />
+                  {fileError}
+                  <button onClick={() => setFileError("")} className="ml-auto text-red-400/60 hover:text-red-400">
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+
+              <div className="relative">
+                <textarea
+                  value={notesInput}
+                  onChange={(e) => setNotesInput(e.target.value)}
+                  placeholder="Paste notes or study material here, or upload a file above..."
+                  rows={5}
+                  className="w-full resize-none rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm leading-relaxed text-white placeholder-white/25 outline-none focus:border-accent-blue/50"
+                />
+                {notesInput && (
+                  <button
+                    type="button"
+                    onClick={() => { setNotesInput(""); setUploadedFile(null); }}
+                    className="absolute top-2 right-2 rounded-lg p-1 text-white/20 hover:bg-white/10 hover:text-white/50"
+                    title="Clear notes"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-3">
+                <label className="text-sm text-white/50 whitespace-nowrap">Number of Questions</label>
+                <div className="flex items-center gap-1">
+                  {[3, 5, 10, 15, 20].map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={() => setQuestionCount(n)}
+                      className={`rounded-lg px-3 py-1.5 text-sm font-semibold transition-all ${
+                        questionCount === n
+                          ? "bg-accent-blue text-white shadow-lg shadow-accent-blue/25"
+                          : "bg-white/5 text-white/40 hover:bg-white/10 hover:text-white/60"
+                      }`}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={questionCount}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value, 10);
+                      if (!isNaN(v) && v >= 1 && v <= 30) setQuestionCount(v);
+                    }}
+                    className="ml-2 w-16 rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-center text-sm text-white outline-none focus:border-accent-blue/50"
+                  />
+                </div>
+              </div>
               <motion.button
                 onClick={handleGenerate}
                 disabled={(!topicInput.trim() && !notesInput.trim()) || generating}
@@ -507,7 +797,7 @@ Rules:
                 ) : (
                   <>
                     <Zap className="h-4 w-4" />
-                    Generate 5-Question Quiz
+                    Generate {questionCount}-Question Quiz
                   </>
                 )}
               </motion.button>
@@ -571,15 +861,15 @@ Rules:
           )}
         </div>
 
-        {/* Leaderboard */}
-        {leaderboard.length > 0 && (
+        {/* Leaderboard — per quiz */}
+        {quizLeaderboards.length > 0 && (
           <div className="mt-8">
             <button
               onClick={() => setShowLeaderboard(!showLeaderboard)}
               className="mb-4 flex items-center gap-2 text-xs font-semibold tracking-wider text-white/30 uppercase hover:text-white/50"
             >
               <BarChart3 className="h-4 w-4" />
-              Score Leaderboard ({leaderboard.length})
+              Leaderboards ({quizLeaderboards.length} quizzes)
               <ChevronRight
                 className={`h-3 w-3 transition-transform ${
                   showLeaderboard ? "rotate-90" : ""
@@ -593,60 +883,107 @@ Rules:
                   initial={{ opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: "auto" }}
                   exit={{ opacity: 0, height: 0 }}
-                  className="overflow-hidden"
+                  className="space-y-4 overflow-hidden"
                 >
-                  <div className="glass-strong overflow-hidden rounded-2xl">
-                    <div className="grid grid-cols-[auto_1fr_auto_auto] items-center gap-4 border-b border-white/5 px-5 py-3 text-[10px] font-semibold tracking-wider text-white/30 uppercase">
-                      <span>#</span>
-                      <span>Student</span>
-                      <span>Quiz</span>
-                      <span>Score</span>
-                    </div>
-                    {leaderboard.map((record, i) => (
-                      <motion.div
-                        key={record.id}
-                        initial={{ opacity: 0, x: -10 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        transition={{ delay: i * 0.03 }}
-                        className="grid grid-cols-[auto_1fr_auto_auto] items-center gap-4 border-b border-white/[0.02] px-5 py-3 last:border-0"
-                      >
-                        <span className="flex h-6 w-6 items-center justify-center">
-                          {i < 3 ? (
-                            <Medal
-                              className={`h-4 w-4 ${
-                                i === 0
-                                  ? "text-accent-gold"
-                                  : i === 1
-                                  ? "text-gray-300"
-                                  : "text-amber-600"
-                              }`}
-                            />
-                          ) : (
-                            <span className="text-xs text-white/20">
-                              {i + 1}
-                            </span>
-                          )}
-                        </span>
-                        <span className="truncate text-sm text-white/70">
-                          {record.userName}
-                        </span>
-                        <span className="truncate text-xs text-white/30">
-                          {record.quizTitle}
-                        </span>
-                        <span
-                          className={`rounded-md px-2 py-0.5 text-xs font-bold ${
-                            record.percentage >= 80
-                              ? "bg-emerald-500/10 text-emerald-400"
-                              : record.percentage >= 50
-                              ? "bg-amber-500/10 text-amber-400"
-                              : "bg-red-500/10 text-red-400"
-                          }`}
+                  {quizLeaderboards.map((qlb) => {
+                    const isExpanded = expandedQuizLb.has(qlb.quizId);
+                    return (
+                      <div key={qlb.quizId} className="glass-strong overflow-hidden rounded-2xl">
+                        {/* Quiz header — click to expand */}
+                        <button
+                          onClick={() => {
+                            setExpandedQuizLb((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(qlb.quizId)) next.delete(qlb.quizId);
+                              else next.add(qlb.quizId);
+                              return next;
+                            });
+                          }}
+                          className="flex w-full items-center justify-between px-5 py-3.5 text-left transition-colors hover:bg-white/5"
                         >
-                          {record.score}/{record.total}
-                        </span>
-                      </motion.div>
-                    ))}
-                  </div>
+                          <div className="flex items-center gap-3">
+                            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent-gold/10">
+                              <Trophy className="h-4 w-4 text-accent-gold" />
+                            </div>
+                            <div>
+                              <h4 className="text-sm font-semibold text-white/80">{qlb.quizTitle}</h4>
+                              <p className="text-[10px] text-white/30">{qlb.entries.length} student{qlb.entries.length !== 1 ? "s" : ""} attempted</p>
+                            </div>
+                          </div>
+                          <ChevronRight
+                            className={`h-4 w-4 text-white/20 transition-transform ${
+                              isExpanded ? "rotate-90" : ""
+                            }`}
+                          />
+                        </button>
+
+                        <AnimatePresence>
+                          {isExpanded && (
+                            <motion.div
+                              initial={{ opacity: 0, height: 0 }}
+                              animate={{ opacity: 1, height: "auto" }}
+                              exit={{ opacity: 0, height: 0 }}
+                              className="overflow-hidden"
+                            >
+                              {/* Column headers */}
+                              <div className="grid grid-cols-[auto_1fr_auto_auto] items-center gap-4 border-t border-white/5 px-5 py-2 text-[10px] font-semibold tracking-wider text-white/25 uppercase">
+                                <span>#</span>
+                                <span>Student</span>
+                                <span>Time</span>
+                                <span>Score</span>
+                              </div>
+
+                              {qlb.entries.map((entry, i) => (
+                                <motion.div
+                                  key={entry.userId}
+                                  initial={{ opacity: 0, x: -10 }}
+                                  animate={{ opacity: 1, x: 0 }}
+                                  transition={{ delay: i * 0.03 }}
+                                  className="grid grid-cols-[auto_1fr_auto_auto] items-center gap-4 border-t border-white/[0.03] px-5 py-2.5"
+                                >
+                                  <span className="flex h-6 w-6 items-center justify-center">
+                                    {i < 3 ? (
+                                      <Medal
+                                        className={`h-4 w-4 ${
+                                          i === 0
+                                            ? "text-accent-gold"
+                                            : i === 1
+                                            ? "text-gray-300"
+                                            : "text-amber-600"
+                                        }`}
+                                      />
+                                    ) : (
+                                      <span className="text-xs text-white/20">
+                                        {i + 1}
+                                      </span>
+                                    )}
+                                  </span>
+                                  <span className="truncate text-sm text-white/70">
+                                    {entry.userName}
+                                  </span>
+                                  <span className="flex items-center gap-1 text-xs text-white/30">
+                                    <Clock className="h-3 w-3" />
+                                    {entry.bestTime != null ? formatTime(entry.bestTime) : "--"}
+                                  </span>
+                                  <span
+                                    className={`rounded-md px-2 py-0.5 text-xs font-bold ${
+                                      entry.bestPercentage >= 80
+                                        ? "bg-emerald-500/10 text-emerald-400"
+                                        : entry.bestPercentage >= 50
+                                        ? "bg-amber-500/10 text-amber-400"
+                                        : "bg-red-500/10 text-red-400"
+                                    }`}
+                                  >
+                                    {entry.bestScore}/{entry.bestTotal} ({entry.bestPercentage}%)
+                                  </span>
+                                </motion.div>
+                              ))}
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    );
+                  })}
                 </motion.div>
               )}
             </AnimatePresence>

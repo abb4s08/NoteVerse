@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import Flashcard3D from "./Flashcard3D";
 import {
   collection,
   addDoc,
@@ -457,34 +458,13 @@ export default function FlashcardsTab({ classroomId, classroomName }: Flashcards
         </div>
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-6">
-          {/* The card */}
-          <motion.div
-            onClick={() => setFlipped(!flipped)}
-            className="glass-strong relative w-full max-w-xl cursor-pointer rounded-3xl p-8"
-            style={{ minHeight: 280, perspective: 1000 }}
-            whileTap={{ scale: 0.98 }}
-          >
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={flipped ? "back" : "front"}
-                initial={{ rotateY: 90, opacity: 0 }}
-                animate={{ rotateY: 0, opacity: 1 }}
-                exit={{ rotateY: -90, opacity: 0 }}
-                transition={{ duration: 0.3 }}
-                className="flex h-full min-h-[200px] flex-col items-center justify-center text-center"
-              >
-                <span className="mb-4 rounded-full bg-white/5 px-3 py-1 text-xs text-white/30">
-                  {flipped ? "ANSWER" : "QUESTION"} — tap to flip
-                </span>
-                <p className={cn(
-                  "text-lg leading-relaxed",
-                  flipped ? "text-accent-gold" : "text-white"
-                )}>
-                  {flipped ? currentCard?.back : currentCard?.front}
-                </p>
-              </motion.div>
-            </AnimatePresence>
-          </motion.div>
+          {/* The card — Premium 3D flip */}
+          <Flashcard3D
+            front={currentCard?.front ?? ""}
+            back={currentCard?.back ?? ""}
+            flipped={flipped}
+            onFlip={() => setFlipped(!flipped)}
+          />
 
           {/* Navigation */}
           <div className="flex items-center gap-4">

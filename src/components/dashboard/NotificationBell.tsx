@@ -96,26 +96,53 @@ export default function NotificationBell({ classroomId }: NotificationBellProps)
       orderBy("createdAt", "desc"),
       limit(50)
     );
-    const unsub = onSnapshot(q, (snap) => {
-      const docs = snap.docs.map(
-        (d) => ({ id: d.id, ...d.data() } as NotificationDoc)
-      );
-      setNotifications(docs);
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const docs = snap.docs.map(
+          (d) => ({ id: d.id, ...d.data() } as NotificationDoc)
+        );
+        setNotifications(docs);
 
-      // Show toast for brand-new notification (not from current user)
-      if (initialLoadDone.current) {
-        for (const d of docs) {
-          if (!prevIds.current.has(d.id) && d.actorUid !== user.uid) {
-            setToast(d);
-            setTimeout(() => setToast(null), 5000);
-            break;
+        // Show toast for brand-new notification (not from current user)
+        if (initialLoadDone.current) {
+          for (const d of docs) {
+            if (!prevIds.current.has(d.id) && d.actorUid !== user.uid) {
+              setToast(d);
+              setTimeout(() => setToast(null), 5000);
+              break;
+            }
           }
         }
-      }
 
-      prevIds.current = new Set(docs.map((d) => d.id));
-      initialLoadDone.current = true;
-    });
+        prevIds.current = new Set(docs.map((d) => d.id));
+        initialLoadDone.current = true;
+      },
+      (error) => {
+        // Composite index not yet created — fall back to unordered query
+        console.warn(
+          "Notification query failed (composite index may be needed):",
+          error.message
+        );
+        const fallbackQ = query(
+          collection(db, "notifications"),
+          where("classId", "==", classroomId),
+          limit(50)
+        );
+        onSnapshot(fallbackQ, (snap) => {
+          const docs = snap.docs
+            .map((d) => ({ id: d.id, ...d.data() } as NotificationDoc))
+            .sort((a, b) => {
+              const aMs = a.createdAt?.toMillis() ?? 0;
+              const bMs = b.createdAt?.toMillis() ?? 0;
+              return bMs - aMs;
+            });
+          setNotifications(docs);
+          prevIds.current = new Set(docs.map((d) => d.id));
+          initialLoadDone.current = true;
+        });
+      }
+    );
     return () => unsub();
   }, [classroomId, user]);
 
@@ -158,7 +185,7 @@ export default function NotificationBell({ classroomId }: NotificationBellProps)
   return (
     <>
       {/* Bell button + dropdown */}
-      <div ref={bellRef} className="relative z-50">
+      <div ref={bellRef} className="relative z-[60]">
         <button
           onClick={handleOpen}
           className={cn(

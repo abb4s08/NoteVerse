@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Sparkles, Rocket } from "lucide-react";
+import { Rocket } from "lucide-react";
 import Link from "next/link";
 import ThemeToggle from "./ThemeToggle";
 
@@ -15,16 +15,14 @@ export default function Navbar() {
     >
       <div className="glass mx-auto flex max-w-6xl items-center justify-between rounded-2xl px-6 py-3">
         {/* Logo */}
-        <Link href="/" className="flex items-center gap-2 group">
+        <Link href="/" className="flex items-center group">
           <motion.div
-            whileHover={{ rotate: 15, scale: 1.1 }}
+            whileHover={{ scale: 1.05 }}
             transition={{ type: "spring", stiffness: 300 }}
+            className="relative -my-2"
           >
-            <Sparkles className="h-6 w-6 text-accent-gold" />
+            <img src="/logo.png" alt="NoteVerse" className="h-20 object-contain brightness-125 drop-shadow-[0_0_15px_rgba(100,150,255,0.5)]" />
           </motion.div>
-          <span className="font-[var(--font-outfit)] text-xl font-bold text-white">
-            Note<span className="text-accent-blue">Verse</span>
-          </span>
         </Link>
 
         {/* Center Links */}

@@ -2,7 +2,6 @@
 
 import { motion } from "framer-motion";
 import {
-  Sparkles,
   Users,
   FileText,
   MessageSquare,
@@ -75,7 +74,7 @@ const navItems: NavItem[] = [
     id: "quiz",
     label: "Quiz Architect",
     icon: <Zap className="h-5 w-5" />,
-    teacherOnly: true,
+
   },
   {
     id: "whiteboard",
@@ -139,20 +138,15 @@ export default function Sidebar({
       )}
     >
       {/* Header */}
-      <div className="flex items-center gap-3 border-b border-white/5 px-4 py-5">
-        <Sparkles className="h-6 w-6 shrink-0 text-accent-gold" />
-        {!collapsed && (
+      <div className="flex items-center border-b border-white/5 px-3 py-4">
+        <img src="/logo.png" alt="NoteVerse" className={`shrink-0 object-contain mix-blend-screen drop-shadow-[0_0_12px_rgba(100,150,255,0.4)] transition-all ${collapsed ? 'h-14 w-14' : 'h-24'}`} />
+        {!collapsed && classroomName && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            className="min-w-0"
+            className="ml-1 min-w-0"
           >
-            <span className="font-[var(--font-outfit)] text-lg font-bold text-white">
-              Note<span className="text-accent-blue">Verse</span>
-            </span>
-            {classroomName && (
-              <p className="truncate text-xs text-white/30">{classroomName}</p>
-            )}
+            <p className="truncate text-xs text-white/30">{classroomName}</p>
           </motion.div>
         )}
       </div>

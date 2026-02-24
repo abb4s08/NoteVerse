@@ -28,6 +28,7 @@ import SchedulerTab from "@/components/dashboard/SchedulerTab";
 import PomodoroTab from "@/components/dashboard/PomodoroTab";
 import AdminPanel from "@/components/dashboard/AdminPanel";
 import SessionRecordingTab from "@/components/dashboard/SessionRecordingTab";
+import ClassroomHeader from "@/components/dashboard/ClassroomHeader";
 
 interface ClassInfo {
   id: string;
@@ -224,7 +225,7 @@ export default function ClassroomHubPage() {
       </button>
 
       {/* Notification bell — top right */}
-      <div className="fixed right-4 top-3 z-50">
+      <div className="fixed right-4 top-3 z-[60]">
         <NotificationBell classroomId={classId} />
       </div>
 
@@ -261,6 +262,15 @@ export default function ClassroomHubPage() {
 
       {/* Main content */}
       <main className="ml-0 flex-1 overflow-y-auto rounded-2xl pt-12 lg:ml-3 lg:pt-0">
+        {/* Classroom Banner Header */}
+        <div className="px-4 pt-4 sm:px-6 sm:pt-5">
+          <ClassroomHeader
+            className={classInfo.name}
+            subject={classInfo.subject}
+            classCode={classInfo.classCode}
+          />
+        </div>
+
         <motion.div
           key={activeTab}
           initial={{ opacity: 0, y: 8 }}

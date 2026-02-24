@@ -21,7 +21,6 @@ import {
   Loader2,
   Plus,
   LogIn,
-  Sparkles,
   Users,
   BookOpen,
   Copy,
@@ -309,11 +308,8 @@ export default function DashboardPage() {
       {/* ── Header ────────────────────────────────────────────────────── */}
       <header className="relative z-10 border-b border-white/5">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
-          <div className="flex items-center gap-3">
-            <Sparkles className="h-7 w-7 text-accent-gold" />
-            <span className="font-[var(--font-outfit)] text-xl font-bold text-white">
-              Note<span className="text-accent-blue">Verse</span>
-            </span>
+          <div className="flex items-center">
+            <img src="/logo.png" alt="NoteVerse" className="h-40 object-contain mix-blend-screen drop-shadow-[0_0_12px_rgba(100,150,255,0.4)]" />
           </div>
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-3">

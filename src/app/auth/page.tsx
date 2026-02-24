@@ -179,7 +179,7 @@ export default function AuthPage() {
               animate={{ rotate: 0, scale: 1 }}
               transition={{ delay: 0.2, type: "spring", stiffness: 200 }}
             >
-              <Sparkles className="mb-3 h-10 w-10 text-accent-gold" />
+              <img src="/logo-icon.png" alt="NoteVerse" className="mb-3 h-20 w-20 object-contain mix-blend-screen drop-shadow-[0_0_12px_rgba(100,150,255,0.4)]" />
             </motion.div>
             <h1 className="font-[var(--font-outfit)] text-2xl font-bold text-white">
               {mode === "signup" ? "Join" : "Welcome back to"}{" "}

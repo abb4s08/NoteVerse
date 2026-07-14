@@ -80,5 +80,9 @@ Open **http://localhost:3000** in your browser.
 
 ## 📸 Preview
 
-<!-- Uploading "Screen Recording 2026-07-14 100832.mp4"... -->
+
+
+https://github.com/user-attachments/assets/de550d6e-c5ab-4334-bef5-381d793facb6
+
+
 

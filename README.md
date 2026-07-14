@@ -80,5 +80,5 @@ Open **http://localhost:3000** in your browser.
 
 ## 📸 Preview
 
-
+<!-- Uploading "Screen Recording 2026-07-14 100832.mp4"... -->
 
